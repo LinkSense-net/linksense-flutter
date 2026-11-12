@@ -49,7 +49,8 @@ class LinkSense {
   Stream<Uri?> get deferredDeepLinks {
     _deepLinks ??= kLinkSenseDeepLinkChannel
         .receiveBroadcastStream()
-        .map((raw) => raw is String && raw.isNotEmpty ? Uri.tryParse(raw) : null)
+        .map(
+            (raw) => raw is String && raw.isNotEmpty ? Uri.tryParse(raw) : null)
         .asBroadcastStream();
     return _deepLinks!;
   }
@@ -57,22 +58,40 @@ class LinkSense {
   // MARK: - Link CRUD passthroughs
 
   Future<LinkSenseLink> createLink(CreateLinkOptions options) async {
-    final raw = await invokeAndTranslate<Map<Object?, Object?>>('createLink', options.toMap());
+    final raw = await invokeAndTranslate<Map<Object?, Object?>>(
+        'createLink', options.toMap());
     return LinkSenseLink.fromMap(raw);
   }
 
   Future<LinkSenseLink> getLink(String id) async {
-    final raw = await invokeAndTranslate<Map<Object?, Object?>>('getLink', <String, Object?>{'id': id});
+    final raw = await invokeAndTranslate<Map<Object?, Object?>>(
+        'getLink', <String, Object?>{'id': id});
     return LinkSenseLink.fromMap(raw);
   }
 
   Future<LinkSenseLink> updateLink(String id, UpdateLinkOptions options) async {
     final args = <String, Object?>{'id': id, 'options': options.toMap()};
-    final raw = await invokeAndTranslate<Map<Object?, Object?>>('updateLink', args);
+    final raw =
+        await invokeAndTranslate<Map<Object?, Object?>>('updateLink', args);
     return LinkSenseLink.fromMap(raw);
   }
 
   Future<void> deleteLink(String id) {
     return invokeAndTranslate<void>('deleteLink', <String, Object?>{'id': id});
+  }
+
+  // MARK: - Paste-to-attribute (iOS)
+
+  /// iOS 16+: attribute the install from a link the user pasted into your
+  /// own UI (e.g. a "paste your invite link" field). The user's paste
+  /// gesture grants access, so iOS shows no paste prompt. Returns the
+  /// matched deep link, or `null`. Always `null` on Android, where the Play
+  /// Install Referrer covers this.
+  Future<Uri?> submitPastedLink(String text) async {
+    final raw = await invokeAndTranslate<String?>(
+      'submitPastedLink',
+      <String, Object?>{'text': text},
+    );
+    return raw == null || raw.isEmpty ? null : Uri.tryParse(raw);
   }
 }

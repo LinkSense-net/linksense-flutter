@@ -25,7 +25,8 @@ Future<T> invokeAndTranslate<T>(
   Object? arguments,
 ]) async {
   try {
-    final result = await kLinkSenseMethodChannel.invokeMethod<T>(method, arguments);
+    final result =
+        await kLinkSenseMethodChannel.invokeMethod<T>(method, arguments);
     if (result == null && null is! T) {
       throw LinkSenseNetworkException('Unexpected null response from $method');
     }
@@ -34,17 +35,24 @@ Future<T> invokeAndTranslate<T>(
     final details = e.details;
     int? status;
     int? retryAfter;
+    Map<String, String>? fieldErrors;
     if (details is Map) {
       final statusRaw = details['status'];
       final retryRaw = details['retryAfter'];
+      final fieldsRaw = details['fieldErrors'];
       if (statusRaw is int) status = statusRaw;
       if (retryRaw is int) retryAfter = retryRaw;
+      if (fieldsRaw is Map) {
+        fieldErrors =
+            fieldsRaw.map((k, v) => MapEntry(k.toString(), v.toString()));
+      }
     }
     throw linkSenseExceptionFromPlatform(
       code: e.code,
       message: e.message ?? e.code,
       status: status,
       retryAfter: retryAfter,
+      fieldErrors: fieldErrors,
     );
   } on MissingPluginException catch (_) {
     // We still want a typed exception when the plugin isn't wired up

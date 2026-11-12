@@ -11,13 +11,37 @@ import 'package:linksense/linksense.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('configure degrades gracefully when SDK key is absent', (tester) async {
+  testWidgets('singleton + stream are reachable without an SDK key', (
+    tester,
+  ) async {
+    expect(LinkSense.instance, isNotNull);
+    expect(LinkSense.instance.deferredDeepLinks, isA<Stream<Uri?>>());
+  });
+
+  testWidgets(
+    'getLink surfaces a typed exception when unconfigured',
+    (tester) async {
+      const sdkKey = String.fromEnvironment('LINKSENSE_SDK_KEY');
+      if (sdkKey.isNotEmpty) return; // covered by the configured branch below
+
+      try {
+        await LinkSense.instance.getLink('missing');
+        fail('expected LinkSenseException');
+      } on LinkSenseException catch (e) {
+        // Without `configure`, the native SDK returns NOT_CONFIGURED. The
+        // point is a typed exception, not an untyped PlatformException.
+        expect(e.code, isNotNull);
+      }
+    },
+  );
+
+  testWidgets('configure degrades gracefully when SDK key is absent', (
+    tester,
+  ) async {
     const sdkKey = String.fromEnvironment('LINKSENSE_SDK_KEY');
-    if (sdkKey.isEmpty) {
-      // Smoke-only path — confirm the singleton is reachable.
-      expect(LinkSense.instance, isNotNull);
-      return;
-    }
-    await LinkSense.instance.configure(const LinkSenseConfiguration(sdkKey: sdkKey));
+    if (sdkKey.isEmpty) return;
+    await LinkSense.instance.configure(
+      const LinkSenseConfiguration(sdkKey: sdkKey),
+    );
   });
 }

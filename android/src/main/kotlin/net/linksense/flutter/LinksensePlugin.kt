@@ -15,9 +15,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-// Native SDK import. Pre-release, the `net.linksense:sdk` dependency
-// is commented out in build.gradle — when wired, this import compiles
-// against the module published from `/linksense-android`.
 import net.linksense.sdk.LinkSense
 import net.linksense.sdk.LinkSenseConfiguration
 import net.linksense.sdk.LinkSenseError
@@ -78,6 +75,9 @@ class LinksensePlugin :
             "getLink" -> handleGetLink(call, result)
             "updateLink" -> handleUpdateLink(call, result)
             "deleteLink" -> handleDeleteLink(call, result)
+            // iOS-only (paste-to-attribute). Android attributes through the
+            // Play Install Referrer, so there is nothing to submit.
+            "submitPastedLink" -> result.success(null)
             else -> result.notImplemented()
         }
     }
@@ -91,7 +91,6 @@ class LinksensePlugin :
             result.error("INVALID_INPUT", "configure requires sdk_key", null)
             return
         }
-        val baseUrl = args["base_url"] as? String
         val enableInstallReferrer = args["enable_install_referrer"] as? Boolean ?: true
         val enableFingerprint = args["enable_fingerprint"] as? Boolean ?: true
         val logLevelName = (args["log_level"] as? String) ?: "off"
@@ -105,12 +104,12 @@ class LinksensePlugin :
             applicationContext,
             LinkSenseConfiguration(
                 sdkKey = sdkKey,
-                baseUrl = baseUrl,
                 enableInstallReferrer = enableInstallReferrer,
                 enableFingerprint = enableFingerprint,
                 logLevel = logLevel,
             ),
         )
+        replayPendingIntents()
         result.success(null)
     }
 
@@ -216,7 +215,7 @@ class LinksensePlugin :
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         activityBinding = binding
         binding.addOnNewIntentListener(this)
-        forwardIntent(binding.activity.intent)
+        observeIntent(binding.activity.intent)
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
@@ -224,8 +223,11 @@ class LinksensePlugin :
         activityBinding = null
     }
 
+    // A config change re-attaches with the same launch intent; reporting it
+    // again would count the open twice.
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        onAttachedToActivity(binding)
+        activityBinding = binding
+        binding.addOnNewIntentListener(this)
     }
 
     override fun onDetachedFromActivity() {
@@ -233,8 +235,27 @@ class LinksensePlugin :
         activityBinding = null
     }
 
+    // Observe only: returning true would consume the intent and starve the
+    // app's own link handling (app_links, go_router).
     override fun onNewIntent(intent: Intent): Boolean {
-        return forwardIntent(intent)
+        observeIntent(intent)
+        return false
+    }
+
+    /** Intents that arrive before Dart calls configure (the launch intent) wait here. */
+    private var isConfigured = false
+    private val pendingIntents = mutableListOf<Intent>()
+
+    private fun observeIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW || intent.data == null) return
+        if (isConfigured) forwardIntent(intent) else pendingIntents += intent
+    }
+
+    private fun replayPendingIntents() {
+        isConfigured = true
+        val queued = pendingIntents.toList()
+        pendingIntents.clear()
+        queued.forEach(::forwardIntent)
     }
 
     private fun forwardIntent(intent: Intent?): Boolean {
@@ -271,14 +292,14 @@ class LinksensePlugin :
 
     private fun updateOptionsFrom(map: Map<*, *>): UpdateLinkOptions {
         return UpdateLinkOptions(
-            name = (map["name"] as? String)?.let(FieldUpdate::Set) ?: FieldUpdate.Absent,
+            name = (map["name"] as? String)?.let { FieldUpdate.Set(it) } ?: FieldUpdate.Absent,
             desktopUrl = fieldUpdate(map, "desktop_url") { it as? String },
             tags = (map["tags"] as? List<*>)?.let { tags -> FieldUpdate.Set(tags.mapNotNull { it as? String }) }
                 ?: FieldUpdate.Absent,
             metadata = fieldUpdate(map, "metadata") { value ->
                 if (value == null) null else toMetadataMap(value as Map<*, *>)
             },
-            iosClipboardEnabled = (map["ios_clipboard_enabled"] as? Boolean)?.let(FieldUpdate::Set) ?: FieldUpdate.Absent,
+            iosClipboardEnabled = (map["ios_clipboard_enabled"] as? Boolean)?.let { FieldUpdate.Set(it) } ?: FieldUpdate.Absent,
             iosFallbackUrl = fieldUpdate(map, "ios_fallback_url") { it as? String },
             androidFallbackUrl = fieldUpdate(map, "android_fallback_url") { it as? String },
             ogTitle = fieldUpdate(map, "og_title") { it as? String },
@@ -348,6 +369,14 @@ class LinksensePlugin :
                 "RATE_LIMITED",
                 error.message,
                 mapOf("retryAfter" to error.retryAfterSeconds),
+            )
+            is LinkSenseError.Unauthorized -> result.error("UNAUTHORIZED", error.message, null)
+            is LinkSenseError.NotFound -> result.error("NOT_FOUND", error.message, null)
+            is LinkSenseError.CustomPathExists -> result.error("CUSTOM_PATH_EXISTS", error.message, null)
+            is LinkSenseError.InvalidInput -> result.error(
+                "INVALID_INPUT",
+                error.message,
+                mapOf("fieldErrors" to error.fieldErrors),
             )
             else -> result.error("UNKNOWN", error.message ?: "unknown", null)
         }

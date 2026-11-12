@@ -5,7 +5,6 @@
 class LinkSenseConfiguration {
   const LinkSenseConfiguration({
     required this.sdkKey,
-    this.baseUrl,
     this.enableClipboard = false,
     this.enableInstallReferrer = true,
     this.enableFingerprint = true,
@@ -14,9 +13,6 @@ class LinkSenseConfiguration {
 
   /// Publishable SDK key in the `ls_sdk_<project>_<random>` format.
   final String sdkKey;
-
-  /// Optional base-URL override. Defaults server-side.
-  final String? baseUrl;
 
   /// iOS only: opt-in clipboard read on first launch for deferred deep
   /// linking. Android ignores this flag (Install Referrer is used).
@@ -35,7 +31,6 @@ class LinkSenseConfiguration {
 
   Map<String, Object?> toMap() => <String, Object?>{
         'sdk_key': sdkKey,
-        if (baseUrl != null) 'base_url': baseUrl,
         'enable_clipboard': enableClipboard,
         'enable_install_referrer': enableInstallReferrer,
         'enable_fingerprint': enableFingerprint,
@@ -83,7 +78,9 @@ class LinkSenseLink {
 
   factory LinkSenseLink.fromMap(Map<dynamic, dynamic> raw) {
     final tagsRaw = raw['tags'];
-    final tags = tagsRaw is List ? tagsRaw.map((e) => e.toString()).toList() : const <String>[];
+    final tags = tagsRaw is List
+        ? tagsRaw.map((e) => e.toString()).toList()
+        : const <String>[];
     return LinkSenseLink(
       id: raw['id'] as String,
       projectId: raw['project_id'] as String,
@@ -94,7 +91,8 @@ class LinkSenseLink {
       iosFallbackUrl: raw['ios_fallback_url'] as String?,
       androidFallbackUrl: raw['android_fallback_url'] as String?,
       ogTitle: (raw['og_title'] ?? raw['social_title']) as String?,
-      ogDescription: (raw['og_description'] ?? raw['social_description']) as String?,
+      ogDescription:
+          (raw['og_description'] ?? raw['social_description']) as String?,
       ogImageUrl: (raw['og_image_url'] ?? raw['social_image_url']) as String?,
       tags: tags,
       iosClipboardEnabled: raw['ios_clipboard_enabled'] as bool? ?? false,
@@ -138,9 +136,11 @@ class CreateLinkOptions {
         if (slug != null) 'slug': slug,
         if (tags != null) 'tags': tags,
         if (metadata != null) 'metadata': metadata,
-        if (iosClipboardEnabled != null) 'ios_clipboard_enabled': iosClipboardEnabled,
+        if (iosClipboardEnabled != null)
+          'ios_clipboard_enabled': iosClipboardEnabled,
         if (iosFallbackUrl != null) 'ios_fallback_url': iosFallbackUrl,
-        if (androidFallbackUrl != null) 'android_fallback_url': androidFallbackUrl,
+        if (androidFallbackUrl != null)
+          'android_fallback_url': androidFallbackUrl,
         if (ogTitle != null) 'og_title': ogTitle,
         if (ogDescription != null) 'og_description': ogDescription,
         if (ogImageUrl != null) 'og_image_url': ogImageUrl,
@@ -186,7 +186,9 @@ class UpdateLinkOptions {
     put('desktop_url', desktopUrl);
     if (tags != null) map['tags'] = tags;
     put('metadata', metadata);
-    if (iosClipboardEnabled != null) map['ios_clipboard_enabled'] = iosClipboardEnabled;
+    if (iosClipboardEnabled != null) {
+      map['ios_clipboard_enabled'] = iosClipboardEnabled;
+    }
     put('ios_fallback_url', iosFallbackUrl);
     put('android_fallback_url', androidFallbackUrl);
     put('og_title', ogTitle);

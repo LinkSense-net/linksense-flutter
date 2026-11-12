@@ -46,12 +46,14 @@ android {
     }
 
     dependencies {
-        // Pre-release: bound the native SDK via a sibling project or a
-        // published Maven Central artifact. CI will swap the first line
-        // for `implementation("net.linksense:sdk:0.1.0")`.
-        // implementation("net.linksense:sdk:0.1.0")
+        // Native LinkSense Android SDK (Maven Central).
+        // Keep in step with IOS_SDK_TAG in ios/sync-ios-sdk.sh and ios/linksense/Package.swift.
+        implementation("net.linksense:sdk:0.2.0")
         testImplementation("org.jetbrains.kotlin:kotlin-test")
+        testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
+        testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
         testImplementation("org.mockito:mockito-core:5.12.0")
+        testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
     }
 
     testOptions {
