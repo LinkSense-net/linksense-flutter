@@ -2,13 +2,7 @@ package net.linksense.flutter
 
 // Unit tests for the Android plugin bridge. JUnit 5 + Mockito-Kotlin.
 //
-// Compile-blocked until the native LinkSense Android SDK is on the
-// build classpath — these tests import `net.linksense.sdk.*` directly
-// (the same types `LinksensePlugin.kt` keys off). Pre-publish, the
-// dependency in `android/build.gradle` is commented out, so `./gradlew
-// test` will fail with `unresolved reference` until the SDK is wired
-// via composite build or Maven publish. Once wired, the suite below
-// runs without further changes.
+// Run from example/android: ./gradlew :linksense:testDebugUnitTest
 
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -58,9 +52,29 @@ class LinksensePluginTest {
     }
 
     @Test
-    fun `surfaceError emits CUSTOM_PATH_EXISTS for CustomPathExists`() {
-        plugin.invokeSurfaceError(LinkSenseError.CustomPathExists, result)
-        verify(result).error(eq("CUSTOM_PATH_EXISTS"), anyOrNull(), anyOrNull())
+    fun `surfaceError emits SLUG_EXISTS for SlugExists`() {
+        plugin.invokeSurfaceError(LinkSenseError.SlugExists, result)
+        verify(result).error(eq("SLUG_EXISTS"), anyOrNull(), anyOrNull())
+    }
+
+    @Test
+    fun `surfaceError emits INVALID_SDK_KEY for InvalidSdkKey`() {
+        plugin.invokeSurfaceError(LinkSenseError.InvalidSdkKey, result)
+        verify(result).error(eq("INVALID_SDK_KEY"), anyOrNull(), anyOrNull())
+    }
+
+    @Test
+    fun `surfaceError emits ACCESS_DENIED with server message and details`() {
+        plugin.invokeSurfaceError(
+            LinkSenseError.AccessDenied("Link limit reached", true, "starter", 10, 10),
+            result,
+        )
+        val detailsCaptor = argumentCaptor<Map<String, Any?>>()
+        verify(result).error(eq("ACCESS_DENIED"), eq("Link limit reached"), detailsCaptor.capture())
+        assertEquals(
+            mapOf("upgradeRequired" to true, "plan" to "starter", "currentUsage" to 10, "limit" to 10),
+            detailsCaptor.firstValue,
+        )
     }
 
     @Test
@@ -74,11 +88,11 @@ class LinksensePluginTest {
     }
 
     @Test
-    fun `surfaceError emits RATE_LIMITED with retryAfter details`() {
+    fun `surfaceError emits RATE_LIMITED with retryAfterSeconds details`() {
         plugin.invokeSurfaceError(LinkSenseError.RateLimited(42), result)
         val detailsCaptor = argumentCaptor<Map<String, Any?>>()
         verify(result).error(eq("RATE_LIMITED"), anyOrNull(), detailsCaptor.capture())
-        assertEquals(42, detailsCaptor.firstValue["retryAfter"])
+        assertEquals(42, detailsCaptor.firstValue["retryAfterSeconds"])
     }
 
     // MARK: - createOptionsFrom
@@ -116,11 +130,12 @@ class LinksensePluginTest {
     // MARK: - updateOptionsFrom FieldUpdate semantics
 
     @Test
-    fun `updateOptionsFrom marks absent fields as FieldUpdate Absent`() {
+    fun `updateOptionsFrom marks absent fields as FieldUpdate Unchanged`() {
         val options = plugin.invokeUpdateOptionsFrom(emptyMap<String, Any?>())
-        assertTrue(options.desktopUrl is FieldUpdate.Absent)
-        assertTrue(options.ogTitle is FieldUpdate.Absent)
-        assertTrue(options.metadata is FieldUpdate.Absent)
+        assertTrue(options.name is FieldUpdate.Unchanged)
+        assertTrue(options.desktopUrl is FieldUpdate.Unchanged)
+        assertTrue(options.ogTitle is FieldUpdate.Unchanged)
+        assertTrue(options.metadata is FieldUpdate.Unchanged)
     }
 
     @Test
@@ -143,6 +158,31 @@ class LinksensePluginTest {
         assertEquals("https://new.example", desktop.value)
         val og = options.ogTitle as FieldUpdate.Set<*>
         assertEquals("New title", og.value)
+    }
+
+    // MARK: - encodeLink metadata
+
+    @Test
+    fun `encodeLink encodes metadata as plain channel values`() {
+        val link = net.linksense.sdk.links.Link(
+            id = "l1", projectId = "p1", name = "n", slug = "s", fullUrl = "https://x/s",
+            metadata = mapOf(
+                "s" to LinkMetadataValue.StringValue("v"),
+                "n" to LinkMetadataValue.LongValue(3),
+                "d" to LinkMetadataValue.DoubleValue(0.5),
+                "b" to LinkMetadataValue.BoolValue(true),
+                "z" to LinkMetadataValue.Null,
+                "a" to LinkMetadataValue.ArrayValue(listOf(LinkMetadataValue.StringValue("x"))),
+                "o" to LinkMetadataValue.ObjectValue(mapOf("k" to LinkMetadataValue.LongValue(1))),
+            ),
+            createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z",
+        )
+        val encoded = plugin.invokeEncodeLink(link)
+        assertEquals(
+            mapOf("s" to "v", "n" to 3L, "d" to 0.5, "b" to true, "z" to null, "a" to listOf("x"), "o" to mapOf("k" to 1L)),
+            encoded["metadata"],
+        )
+        assertNull(plugin.invokeEncodeLink(link.copy(metadata = null))["metadata"])
     }
 
     // MARK: - toMetadataValue conversion
@@ -195,6 +235,12 @@ private fun LinksensePlugin.invokeUpdateOptionsFrom(map: Map<*, *>): net.linksen
     val m = LinksensePlugin::class.java.getDeclaredMethod("updateOptionsFrom", Map::class.java)
         .apply { isAccessible = true }
     return m.invoke(this, map) as net.linksense.sdk.links.UpdateLinkOptions
+}
+
+private fun LinksensePlugin.invokeEncodeLink(link: net.linksense.sdk.links.Link): Map<*, *> {
+    val m = LinksensePlugin::class.java.getDeclaredMethod("encodeLink", net.linksense.sdk.links.Link::class.java)
+        .apply { isAccessible = true }
+    return m.invoke(this, link) as Map<*, *>
 }
 
 private fun LinksensePlugin.invokeToMetadataValue(value: Any?): LinkMetadataValue? {

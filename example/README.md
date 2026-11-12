@@ -38,22 +38,22 @@ reach it via `10.0.2.2`. Bind to `0.0.0.0:3000` instead.
 
 | Card | Plugin surface exercised |
 |---|---|
-| **Status banner** | `LinkSense.instance.deferredDeepLinks` stream — shows the last emission with timestamp |
+| **Status banner** | `LinkSense.instance.deferredDeepLinks` and `deepLinks` streams — shows the last emission with timestamp |
 | **1. Configure & start** | Every field on `LinkSenseConfiguration` (`sdkKey`, `baseUrl`, `enableClipboard`, `enableInstallReferrer`, `enableFingerprint`, `logLevel`) → `configure()` → `start()` |
 | **2. Forward Universal Link** | `handleUniversalLink(Uri)` — paste a URL to simulate the iOS warm path. No-op on Android |
 | **3. Create link** | Every field on `CreateLinkOptions` (incl. multi-line JSON `metadata` and comma-separated `tags`) → `createLink()` |
-| **4. Get / update / delete** | `getLink()`, `updateLink()`, `deleteLink()`. The update sub-form has a **"Clear"** checkbox per clearable field — flip it to send the `linkSenseClear` sentinel (explicit JSON `null`) instead of omitting the key |
-| **5. Activity log** | Every call's outcome (last 50). Typed exceptions surface with their `code` and extras: `LinkSenseInvalidInput.fieldErrors`, `LinkSenseRateLimited.retryAfterSeconds`, etc. |
+| **4. Get / update / delete** | `getLink()`, `updateLink()`, `deleteLink()`. The update sub-form has a **"Clear"** checkbox per clearable field — flip it to send `FieldUpdate.clear()` (explicit JSON `null`) instead of omitting the key |
+| **5. Activity log** | Every call's outcome (last 50). Typed exceptions surface with their `code` and extras: `LinkSenseInvalidInputException.fieldErrors`, `LinkSenseRateLimitedException.retryAfterSeconds`, `LinkSenseAccessDeniedException.upgradeRequired`, etc. |
 
 ## Forcing errors
 
 The playground is also the easiest way to see each typed exception fire:
 
-- Configure with a bogus key like `ls_sdk_bad_xyz` → `LinkSenseInvalidSdkKey` on `start()`
-- Create a link with an empty `name` → `LinkSenseInvalidInput` with `fieldErrors` shown inline
-- Create the same `slug` twice → `LinkSenseCustomPathExists`
-- Get a link by an unknown id → `LinkSenseNotFound`
-- Update a link your SDK key doesn't own → `LinkSenseForbiddenCrossScope`
+- Configure with a bogus key like `ls_sdk_bad_xyz` → `LinkSenseInvalidSdkKeyException` from `configure()`
+- Create a link with an empty `name` → `LinkSenseInvalidInputException` with `fieldErrors` shown inline
+- Create the same `slug` twice → `LinkSenseSlugExistsException`
+- Get a link by an unknown id → `LinkSenseNotFoundException`
+- Update a link your SDK key doesn't own → `LinkSenseForbiddenCrossScopeException`
 
 ## Not wired up (intentionally)
 

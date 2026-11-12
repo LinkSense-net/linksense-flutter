@@ -90,7 +90,7 @@ void main() {
           'link-1',
           const UpdateLinkOptions(
             name: 'renamed',
-            desktopUrl: linkSenseClear,
+            desktopUrl: FieldUpdate.clear(),
           ));
       final args = calls.single.arguments as Map;
       final options = args['options'] as Map;
@@ -129,7 +129,7 @@ void main() {
           PlatformException(code: 'FORBIDDEN_CROSS_SCOPE', message: 'nope'));
       expect(
         LinkSense.instance.getLink('link-1'),
-        throwsA(isA<LinkSenseForbiddenCrossScope>()),
+        throwsA(isA<LinkSenseForbiddenCrossScopeException>()),
       );
     });
 
@@ -137,12 +137,12 @@ void main() {
       mockThrow(PlatformException(
         code: 'RATE_LIMITED',
         message: 'slow down',
-        details: <String, Object?>{'retryAfter': 42},
+        details: <String, Object?>{'retryAfterSeconds': 42},
       ));
       try {
         await LinkSense.instance.getLink('link-1');
         fail('expected RateLimited exception');
-      } on LinkSenseRateLimited catch (e) {
+      } on LinkSenseRateLimitedException catch (e) {
         expect(e.retryAfterSeconds, 42);
       }
     });
@@ -153,7 +153,7 @@ void main() {
       try {
         await LinkSense.instance.getLink('link-1');
         fail('expected DecodeFailure');
-      } on LinkSenseDecodeFailure catch (e) {
+      } on LinkSenseDecodeFailureException catch (e) {
         expect(e.message, 'missing field');
         expect(e.code, 'DECODE_FAILURE');
       }
@@ -163,7 +163,7 @@ void main() {
       mockThrow(PlatformException(code: 'UNAUTHORIZED', message: 'bad key'));
       expect(
         LinkSense.instance.getLink('link-1'),
-        throwsA(isA<LinkSenseUnauthorized>()),
+        throwsA(isA<LinkSenseUnauthorizedException>()),
       );
     });
 
@@ -171,18 +171,81 @@ void main() {
       mockThrow(PlatformException(code: 'NOT_FOUND', message: 'gone'));
       expect(
         LinkSense.instance.getLink('link-1'),
-        throwsA(isA<LinkSenseNotFound>()),
+        throwsA(isA<LinkSenseNotFoundException>()),
       );
     });
 
-    test('CUSTOM_PATH_EXISTS → typed exception', () async {
-      mockThrow(
-          PlatformException(code: 'CUSTOM_PATH_EXISTS', message: 'taken'));
+    test('SLUG_EXISTS → typed exception', () async {
+      mockThrow(PlatformException(code: 'SLUG_EXISTS', message: 'taken'));
       expect(
         LinkSense.instance
             .createLink(const CreateLinkOptions(name: 'x', slug: 'taken')),
-        throwsA(isA<LinkSenseCustomPathExists>()),
+        throwsA(isA<LinkSenseSlugExistsException>()),
       );
+    });
+
+    test('INVALID_SDK_KEY from configure → typed exception', () async {
+      mockThrow(PlatformException(code: 'INVALID_SDK_KEY', message: 'bad'));
+      expect(
+        LinkSense.instance
+            .configure(const LinkSenseConfiguration(sdkKey: 'nope')),
+        throwsA(isA<LinkSenseInvalidSdkKeyException>()),
+      );
+    });
+
+    test('ACCESS_DENIED carries plan-limit details', () async {
+      mockThrow(PlatformException(
+        code: 'ACCESS_DENIED',
+        message: 'Link limit reached',
+        details: <String, Object?>{
+          'upgradeRequired': true,
+          'plan': 'starter',
+          'currentUsage': 10,
+          'limit': 10,
+        },
+      ));
+      try {
+        await LinkSense.instance.createLink(const CreateLinkOptions(name: 'x'));
+        fail('expected AccessDenied');
+      } on LinkSenseAccessDeniedException catch (e) {
+        expect(e.message, 'Link limit reached');
+        expect(e.code, 'ACCESS_DENIED');
+        expect(e.upgradeRequired, isTrue);
+        expect(e.plan, 'starter');
+        expect(e.currentUsage, 10);
+        expect(e.limit, 10);
+      }
+    });
+
+    test('ACCESS_DENIED without details defaults upgradeRequired to false',
+        () async {
+      mockThrow(PlatformException(
+        code: 'ACCESS_DENIED',
+        message: 'Platform not allowed',
+        details: <String, Object?>{
+          'upgradeRequired': false,
+          'plan': null,
+          'currentUsage': null,
+          'limit': null,
+        },
+      ));
+      try {
+        await LinkSense.instance.start();
+        fail('expected AccessDenied');
+      } on LinkSenseAccessDeniedException catch (e) {
+        expect(e.message, 'Platform not allowed');
+        expect(e.upgradeRequired, isFalse);
+        expect(e.plan, isNull);
+        expect(e.currentUsage, isNull);
+        expect(e.limit, isNull);
+      }
+      mockThrow(PlatformException(code: 'ACCESS_DENIED', message: 'x'));
+      try {
+        await LinkSense.instance.start();
+        fail('expected AccessDenied');
+      } on LinkSenseAccessDeniedException catch (e) {
+        expect(e.upgradeRequired, isFalse);
+      }
     });
 
     test('INVALID_INPUT carries fieldErrors map', () async {
@@ -199,7 +262,7 @@ void main() {
       try {
         await LinkSense.instance.createLink(const CreateLinkOptions(name: ''));
         fail('expected InvalidInput');
-      } on LinkSenseInvalidInput catch (e) {
+      } on LinkSenseInvalidInputException catch (e) {
         expect(e.fieldErrors,
             {'name': 'too short', 'metadata.tag': 'must be string'});
       }
@@ -212,7 +275,7 @@ void main() {
       try {
         await LinkSense.instance.createLink(const CreateLinkOptions(name: ''));
         fail('expected InvalidInput');
-      } on LinkSenseInvalidInput catch (e) {
+      } on LinkSenseInvalidInputException catch (e) {
         expect(e.fieldErrors, isEmpty);
       }
     });
@@ -238,7 +301,7 @@ void main() {
           .setMockMethodCallHandler(methodChannel, null);
       expect(
         LinkSense.instance.getLink('link-1'),
-        throwsA(isA<LinkSenseNotConfigured>()),
+        throwsA(isA<LinkSenseNotConfiguredException>()),
       );
     });
   });

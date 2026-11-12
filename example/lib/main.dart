@@ -60,6 +60,7 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
   bool _configured = false;
   bool _started = false;
   StreamSubscription<Uri?>? _deepLinkSub;
+  StreamSubscription<Uri?>? _deferredDeepLinkSub;
   Uri? _lastDeepLink;
   DateTime? _lastDeepLinkAt;
 
@@ -108,6 +109,7 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
   @override
   void dispose() {
     _deepLinkSub?.cancel();
+    _deferredDeepLinkSub?.cancel();
     for (final c in <TextEditingController>[
       _sdkKey,
       _pastedText,
@@ -145,7 +147,7 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
       final out = await op();
       _appendLog(action: action, success: true, summary: 'ok');
       return out;
-    } on LinkSenseInvalidInput catch (e) {
+    } on LinkSenseInvalidInputException catch (e) {
       final details = e.fieldErrors.entries
           .map((kv) => '${kv.key}: ${kv.value}')
           .join('\n');
@@ -156,16 +158,26 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
         details: 'fieldErrors:\n$details',
       );
       _toast('${e.code ?? 'INVALID_INPUT'} — ${e.fieldErrors}');
-    } on LinkSenseRateLimited catch (e) {
+    } on LinkSenseRateLimitedException catch (e) {
       _appendLog(
         action: action,
         success: false,
         summary: e.code ?? 'RATE_LIMITED',
-        details: 'retryAfter: ${e.retryAfterSeconds}s',
+        details: 'retryAfterSeconds: ${e.retryAfterSeconds}',
       );
       _toast(
         '${e.code ?? 'RATE_LIMITED'} — retry in ${e.retryAfterSeconds ?? '?'}s',
       );
+    } on LinkSenseAccessDeniedException catch (e) {
+      _appendLog(
+        action: action,
+        success: false,
+        summary: e.code ?? 'ACCESS_DENIED',
+        details:
+            '${e.message}\nupgradeRequired: ${e.upgradeRequired}, '
+            'plan: ${e.plan}, usage: ${e.currentUsage}/${e.limit}',
+      );
+      _toast('${e.code ?? 'ACCESS_DENIED'} — ${e.message}');
     } on LinkSenseException catch (e) {
       _appendLog(
         action: action,
@@ -242,18 +254,27 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
     if (!mounted) return;
     setState(() => _configured = true);
 
-    _deepLinkSub ??= LinkSense.instance.deferredDeepLinks.listen((uri) {
+    void onLink(String stream, Uri? uri) {
       if (!mounted) return;
       setState(() {
         _lastDeepLink = uri;
         _lastDeepLinkAt = DateTime.now();
       });
       _appendLog(
-        action: 'deferredDeepLinks',
+        action: stream,
         success: true,
         summary: uri?.toString() ?? '(null)',
       );
-    });
+    }
+
+    // Deferred link from start(): fires once per install resolution.
+    _deferredDeepLinkSub ??= LinkSense.instance.deferredDeepLinks.listen(
+      (uri) => onLink('deferredDeepLinks', uri),
+    );
+    // Every Universal Link / App Link open.
+    _deepLinkSub ??= LinkSense.instance.deepLinks.listen(
+      (uri) => onLink('deepLinks', uri),
+    );
 
     var startOk = false;
     try {
@@ -341,8 +362,7 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
       _toast('Enter a link ID.');
       return;
     }
-    final link =
-        await _run('getLink', () => LinkSense.instance.getLink(id));
+    final link = await _run('getLink', () => LinkSense.instance.getLink(id));
     if (link == null) return;
     if (!mounted) return;
     setState(() => _displayedLink = link);
@@ -355,9 +375,9 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
       return;
     }
 
-    Object? metadata;
+    FieldUpdate<Map<String, Object?>>? metadata;
     if (_updateMetadataClear) {
-      metadata = linkSenseClear;
+      metadata = const FieldUpdate.clear();
     } else if (_updateMetadata.text.trim().isNotEmpty) {
       try {
         final parsed = jsonDecode(_updateMetadata.text.trim());
@@ -365,7 +385,7 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
           _toast('Metadata must be a JSON object.');
           return;
         }
-        metadata = Map<String, Object?>.from(parsed);
+        metadata = FieldUpdate.set(Map<String, Object?>.from(parsed));
       } on FormatException catch (e) {
         _toast('Metadata JSON: ${e.message}');
         return;
@@ -385,9 +405,14 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
       tags: tags,
       metadata: metadata,
       iosClipboardEnabled: clipboard,
-      iosFallbackUrl: _fieldFromText(_updateIosFallback, _updateIosFallbackClear),
-      androidFallbackUrl:
-          _fieldFromText(_updateAndroidFallback, _updateAndroidFallbackClear),
+      iosFallbackUrl: _fieldFromText(
+        _updateIosFallback,
+        _updateIosFallbackClear,
+      ),
+      androidFallbackUrl: _fieldFromText(
+        _updateAndroidFallback,
+        _updateAndroidFallbackClear,
+      ),
       ogTitle: _fieldFromText(_updateOgTitle, _updateOgTitleClear),
       ogDescription: _fieldFromText(_updateOgDesc, _updateOgDescClear),
       ogImageUrl: _fieldFromText(_updateOgImage, _updateOgImageClear),
@@ -448,10 +473,13 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
     return parts.isEmpty ? null : parts;
   }
 
-  static Object? _fieldFromText(TextEditingController c, bool clear) {
-    if (clear) return linkSenseClear;
+  static FieldUpdate<String>? _fieldFromText(
+    TextEditingController c,
+    bool clear,
+  ) {
+    if (clear) return const FieldUpdate.clear();
     final t = c.text.trim();
-    return t.isEmpty ? null : t;
+    return t.isEmpty ? null : FieldUpdate.set(t);
   }
 
   static String _formatTime(DateTime t) {
@@ -495,8 +523,9 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
     Widget badge(String label, bool on) {
       return Chip(
         label: Text(label),
-        backgroundColor:
-            on ? colors.primaryContainer : colors.surfaceContainerHighest,
+        backgroundColor: on
+            ? colors.primaryContainer
+            : colors.surfaceContainerHighest,
         labelStyle: TextStyle(
           color: on ? colors.onPrimaryContainer : colors.onSurfaceVariant,
         ),
@@ -512,7 +541,10 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
             Wrap(
               spacing: 8,
               children: [
-                badge(_configured ? 'Configured ✓' : 'Not configured', _configured),
+                badge(
+                  _configured ? 'Configured ✓' : 'Not configured',
+                  _configured,
+                ),
                 badge(_started ? 'Started ✓' : 'Not started', _started),
               ],
             ),
@@ -600,7 +632,8 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
   Widget _buildPasteCard() {
     return _section(
       title: '2. Paste-to-attribute (iOS)',
-      subtitle: 'Attributes the install from a pasted link. Always null on Android.',
+      subtitle:
+          'Attributes the install from a pasted link. Always null on Android.',
       children: [
         TextField(
           controller: _pastedText,
@@ -746,18 +779,19 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
           ],
         ),
         const SizedBox(height: 16),
-        Text(
-          'Update fields',
-          style: Theme.of(context).textTheme.titleSmall,
-        ),
+        Text('Update fields', style: Theme.of(context).textTheme.titleSmall),
         Text(
           'Leave empty to omit the field. Tick "Clear" to send explicit null.',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 8),
         _textField(_updateName, 'name (set, not clearable)'),
-        _clearableRow('desktopUrl', _updateDesktop, _updateDesktopClear,
-            (v) => setState(() => _updateDesktopClear = v)),
+        _clearableRow(
+          'desktopUrl',
+          _updateDesktop,
+          _updateDesktopClear,
+          (v) => setState(() => _updateDesktopClear = v),
+        ),
         _textField(_updateTags, 'tags (comma-separated; empty = omit)'),
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -809,18 +843,36 @@ class _PlaygroundPageState extends State<PlaygroundPage> {
             if (v != null) setState(() => _updateIosClipboard = v);
           },
         ),
-        _clearableRow('iosFallbackUrl', _updateIosFallback,
-            _updateIosFallbackClear,
-            (v) => setState(() => _updateIosFallbackClear = v)),
-        _clearableRow('androidFallbackUrl', _updateAndroidFallback,
-            _updateAndroidFallbackClear,
-            (v) => setState(() => _updateAndroidFallbackClear = v)),
-        _clearableRow('ogTitle', _updateOgTitle, _updateOgTitleClear,
-            (v) => setState(() => _updateOgTitleClear = v)),
-        _clearableRow('ogDescription', _updateOgDesc, _updateOgDescClear,
-            (v) => setState(() => _updateOgDescClear = v)),
-        _clearableRow('ogImageUrl', _updateOgImage, _updateOgImageClear,
-            (v) => setState(() => _updateOgImageClear = v)),
+        _clearableRow(
+          'iosFallbackUrl',
+          _updateIosFallback,
+          _updateIosFallbackClear,
+          (v) => setState(() => _updateIosFallbackClear = v),
+        ),
+        _clearableRow(
+          'androidFallbackUrl',
+          _updateAndroidFallback,
+          _updateAndroidFallbackClear,
+          (v) => setState(() => _updateAndroidFallbackClear = v),
+        ),
+        _clearableRow(
+          'ogTitle',
+          _updateOgTitle,
+          _updateOgTitleClear,
+          (v) => setState(() => _updateOgTitleClear = v),
+        ),
+        _clearableRow(
+          'ogDescription',
+          _updateOgDesc,
+          _updateOgDescClear,
+          (v) => setState(() => _updateOgDescClear = v),
+        ),
+        _clearableRow(
+          'ogImageUrl',
+          _updateOgImage,
+          _updateOgImageClear,
+          (v) => setState(() => _updateOgImageClear = v),
+        ),
         const SizedBox(height: 8),
         FilledButton.icon(
           onPressed: _updateLink,

@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'linksense'
-  s.version          = '0.2.0'
+  s.version          = '0.3.0'
   s.summary          = 'Flutter plugin for LinkSense dynamic links and deferred deep linking.'
   s.description      = <<-DESC
 Thin MethodChannel bridge over the native LinkSense iOS SDK. Handles SDK

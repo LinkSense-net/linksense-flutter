@@ -16,11 +16,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture (three layers)
 
-1. **Dart facade** — `lib/linksense.dart` exposes the `LinkSense` singleton (`configure`, `start`, `deferredDeepLinks`, `handleUniversalLink`, link CRUD). All public types live under `lib/src/`: models (`models.dart`), method/event channel constants + `invokeAndTranslate<T>` helper (`method_channel.dart`), and the sealed `LinkSenseException` hierarchy (`exceptions.dart`).
-2. **Platform channels** — names are `net.linksense.flutter/method` (invocations) and `net.linksense.flutter/deep-links` (broadcast stream). Dart method names, arg keys, and error `code`s are part of the contract — the native sides (`SwiftLinksensePlugin.swift`, `LinksensePlugin.kt`) key off them directly.
+1. **Dart facade** — `lib/linksense.dart` exposes the `LinkSense` singleton (`configure`, `start`, `deferredDeepLinks`, `deepLinks`, `submitPastedLink`, link CRUD). All public types live under `lib/src/`: models (`models.dart`), method/event channel constants + `invokeAndTranslate<T>` helper (`method_channel.dart`), and the sealed `LinkSenseException` hierarchy (`exceptions.dart`).
+2. **Platform channels** — `net.linksense.flutter/method` (invocations), `net.linksense.flutter/deep-links` (link opens → `deepLinks`) and `net.linksense.flutter/deferred-deep-links` (the `start()` result → `deferredDeepLinks`). Each event is a URL string, `""` for an unresolved link (Dart maps it to `null`). Each native bridge has one `BufferedStream` per event channel: a sink plus a FIFO buffer flushed when that stream's listener attaches. Dart method names, arg keys, and error `code`s are part of the contract — the native sides (`SwiftLinksensePlugin.swift`, `LinksensePlugin.kt`) key off them directly.
 3. **Native bridges**
-   - **iOS** — `ios/linksense/Sources/linksense/SwiftLinksensePlugin.swift`. Routes calls to `LinkSense.shared`. The `handleStart` and `handleUniversalLink` handlers both feed the single `emitDeepLink(_:)` helper, so deferred (cold-start) and Universal Link (warm-path) URLs flow into the same Dart stream.
-   - **Android** — `android/src/main/kotlin/net/linksense/flutter/LinksensePlugin.kt`. Forwards to `LinkSense` singleton, emits `result.error(...)` with the SDK's error codes. Implements `ActivityAware` + `NewIntentListener` to auto-forward App-Link intents — integrators don't touch `MainActivity`. The plugin's `handleUniversalLink` method is a no-op on Android (calling it from cross-platform Dart code is harmless).
+   - **iOS** — `ios/linksense/Sources/linksense/SwiftLinksensePlugin.swift`. Routes calls to `LinkSense.shared`. `start` feeds `onDeferredDeepLink` into the deferred stream; the app-delegate `continue userActivity` hook forwards Universal Links (held until `configure` succeeds) and feeds the link-open stream. `configure` catches the native throw and returns `INVALID_SDK_KEY`; `isConfigured` is set only on success.
+   - **Android** — `android/src/main/kotlin/net/linksense/flutter/LinksensePlugin.kt`. Forwards to `LinkSense` singleton, emits `result.error(...)` with the SDK's error codes. Implements `ActivityAware` + `NewIntentListener` to auto-forward App-Link intents to the link-open stream — integrators don't touch `MainActivity`. Intents that arrive before `configure` are replayed only after it succeeds. `submitPastedLink` calls the native no-op (returns `null`).
 
 When changing a method signature or arg shape, you must update **all four** sites: Dart facade, Dart model `toMap`, Swift `handle*`, Kotlin `handle*`. The channel contract has no compile-time checker.
 
@@ -28,30 +28,33 @@ When changing a method signature or arg shape, you must update **all four** site
 
 `lib/src/exceptions.dart` maps native error codes → Dart subclasses in `linkSenseExceptionFromPlatform`. When adding a new native error, update all three: Swift `flutterError(from:)`, Kotlin `surfaceError`, and the Dart switch.
 
-12 typed exceptions:
+13 typed exceptions (every class name ends in `Exception`). Both bridges emit the same codes and detail keys:
 
-| Class | Code |
-|---|---|
-| `LinkSenseNotConfigured` | `NOT_CONFIGURED` |
-| `LinkSenseInvalidSdkKey` | `INVALID_SDK_KEY` |
-| `LinkSenseNetworkException` | `NETWORK` |
-| `LinkSenseDecodeFailure` | `DECODE_FAILURE` |
-| `LinkSenseUnauthorized` | `UNAUTHORIZED` |
-| `LinkSenseForbiddenCrossScope` | `FORBIDDEN_CROSS_SCOPE` |
-| `LinkSenseForbiddenField` | `FORBIDDEN_FIELD` |
-| `LinkSenseInvalidInput` (carries `fieldErrors`) | `INVALID_INPUT` |
-| `LinkSenseNotFound` | `NOT_FOUND` |
-| `LinkSenseCustomPathExists` | `CUSTOM_PATH_EXISTS` |
-| `LinkSenseRateLimited` (carries `retryAfterSeconds`) | `RATE_LIMITED` |
-| `LinkSenseServerException` (catch-all) | _any other server code_ |
+| Class | Code | `details` keys |
+|---|---|---|
+| `LinkSenseNotConfiguredException` | `NOT_CONFIGURED` | — |
+| `LinkSenseInvalidSdkKeyException` | `INVALID_SDK_KEY` (from `configure`) | — |
+| `LinkSenseNetworkException` | `NETWORK` | — |
+| `LinkSenseDecodeFailureException` | `DECODE_FAILURE` | — |
+| `LinkSenseUnauthorizedException` | `UNAUTHORIZED` | — |
+| `LinkSenseAccessDeniedException` | `ACCESS_DENIED` (message = server message) | `upgradeRequired`, `plan`, `currentUsage`, `limit` |
+| `LinkSenseForbiddenCrossScopeException` | `FORBIDDEN_CROSS_SCOPE` | — |
+| `LinkSenseForbiddenFieldException` | `FORBIDDEN_FIELD` | — |
+| `LinkSenseInvalidInputException` | `INVALID_INPUT` | `fieldErrors` |
+| `LinkSenseNotFoundException` | `NOT_FOUND` | — |
+| `LinkSenseSlugExistsException` | `SLUG_EXISTS` (Dart also accepts legacy `CUSTOM_PATH_EXISTS`) | — |
+| `LinkSenseRateLimitedException` | `RATE_LIMITED` | `retryAfterSeconds` |
+| `LinkSenseServerException` (catch-all) | _any other server code_ | `status` |
 
-Backend codes not explicitly typed (e.g. `INVALID_FORMAT`, `BUNDLE_ID_EXISTS`, `SUBDOMAIN_TAKEN`, `LINKED_REFERENCES`, `ACCESS_DENIED`, `AUTH_REQUIRED`, all the 5xx codes) fall into `LinkSenseServerException` — integrators inspect `.code` for narrower handling. `MissingPluginException` (e.g. integrator forgot SPM enable) becomes `LinkSenseNotConfigured`.
+Backend codes not explicitly typed (e.g. `INVALID_FORMAT`, `BUNDLE_ID_EXISTS`, `SUBDOMAIN_TAKEN`, `LINKED_REFERENCES`, all the 5xx codes) fall into `LinkSenseServerException` — integrators inspect `.code` for narrower handling. `MissingPluginException` (e.g. integrator forgot SPM enable) becomes `LinkSenseNotConfiguredException`.
 
 `INVALID_INPUT.fieldErrors` is the **Android-flattened** shape (`Map<String, String>`) — backend emits a raw Zod issues array; the Android SDK flattens path-joined-by-`.` → first message. iOS bridge currently lets `INVALID_INPUT` through as a generic server case; the Dart switch keys off `code` regardless.
 
-## UpdateLinkOptions sentinel
+## UpdateLinkOptions tri-state
 
-`UpdateLinkOptions` has two null semantics: a Dart-level `null` omits the key from the request; the `linkSenseClear` / `LinkSenseFieldClear` sentinel emits explicit JSON `null` (clears server-side). Mirrored on the Kotlin side as `FieldUpdate.Absent` vs `FieldUpdate.Clear`, on Swift as keys present-but-nil (double-optional). Don't "simplify" this by collapsing to nullable — it is load-bearing.
+Clearable `UpdateLinkOptions` fields are `FieldUpdate<T>?`: `null` = unchanged (key omitted from the wire map), `FieldUpdate.set(v)` = key with value, `FieldUpdate.clear()` = key with explicit `null` (clears server-side). `name`, `tags`, `iosClipboardEnabled` are plain `T?` (the server can't clear them). The bridges key off key-presence: Kotlin maps absent → `FieldUpdate.Unchanged`, null → `FieldUpdate.Clear`; Swift → `.unchanged` / `.clear`. Don't collapse absent and null — it is load-bearing.
+
+`LinkSenseLink.metadata` arrives as plain codec values (String, int, double, bool, List, Map, null) — both bridges' `encodeLink` convert the native `LinkMetadataValue` tree.
 
 ## Commands
 
@@ -67,8 +70,10 @@ flutter test --name 'INVALID_INPUT'                   # single test by name
 # Format
 dart format lib test example
 
-# Android-side Kotlin bridge tests (JUnit + Mockito)
-cd android && ./gradlew test
+# Android-side Kotlin bridge tests (JUnit 5 + Mockito), via the example's Gradle build
+cd example && flutter pub get && cd android && ./gradlew :linksense:testDebugUnitTest
+# (before net.linksense:sdk is on Maven Central, add a throwaway --init-script that adds mavenLocal()
+#  to the root build only; never commit mavenLocal())
 
 # Host-machine one-time: enable SPM (Flutter 3.24+ default-off, 3.27+ default-on)
 flutter config --enable-swift-package-manager

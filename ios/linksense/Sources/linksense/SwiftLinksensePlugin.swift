@@ -4,16 +4,18 @@ import UIKit
 // by ios/sync-ios-sdk.sh), so its types need no import.
 
 /// Flutter→iOS bridge. Routes MethodChannel calls to `LinkSense.shared` and
-/// emits deep links (the deferred one, then each Universal Link open) on the
-/// EventChannel.
+/// emits Universal Link opens on `…/deep-links` and the deferred `start()`
+/// result on `…/deferred-deep-links`.
 ///
 /// Method names match the Dart facade in `lib/linksense.dart`. Every error
 /// surfaced to Flutter is a `FlutterError` whose `code` matches the codes in
 /// `lib/src/exceptions.dart`.
-public class SwiftLinksensePlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
+public class SwiftLinksensePlugin: NSObject, FlutterPlugin {
 
-    private var eventSink: FlutterEventSink?
-    private var bufferedDeepLinks: [String] = []
+    /// Link opens (Universal Links).
+    private let deepLinks = BufferedStream()
+    /// The deferred deep link from `start()`.
+    private let deferredDeepLinks = BufferedStream()
     private var isConfigured = false
     /// Universal Links that arrived before `configure` (a cold launch from a
     /// link reaches the app delegate before Dart has run).
@@ -24,14 +26,13 @@ public class SwiftLinksensePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
             name: "net.linksense.flutter/method",
             binaryMessenger: registrar.messenger()
         )
-        let eventChannel = FlutterEventChannel(
-            name: "net.linksense.flutter/deep-links",
-            binaryMessenger: registrar.messenger()
-        )
         let instance = SwiftLinksensePlugin()
         registrar.addMethodCallDelegate(instance, channel: methodChannel)
         registrar.addApplicationDelegate(instance)
-        eventChannel.setStreamHandler(instance)
+        FlutterEventChannel(name: "net.linksense.flutter/deep-links", binaryMessenger: registrar.messenger())
+            .setStreamHandler(instance.deepLinks)
+        FlutterEventChannel(name: "net.linksense.flutter/deferred-deep-links", binaryMessenger: registrar.messenger())
+            .setStreamHandler(instance.deferredDeepLinks)
     }
 
     // MARK: - App delegate (Universal Links)
@@ -57,7 +58,7 @@ public class SwiftLinksensePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
 
     private func forward(_ activity: NSUserActivity) {
         LinkSense.shared.continueUserActivity(activity) { [weak self] resolved in
-            self?.emitDeepLink(resolved)
+            self?.deepLinks.emit(resolved)
         }
     }
 
@@ -68,7 +69,7 @@ public class SwiftLinksensePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         case "configure":
             handleConfigure(call, result: result)
         case "start":
-            LinkSense.shared.onDeferredDeepLink { [weak self] url in self?.emitDeepLink(url) }
+            LinkSense.shared.onDeferredDeepLink { [weak self] url in self?.deferredDeepLinks.emit(url) }
             LinkSense.shared.start()
             result(nil)
         case "submitPastedLink":
@@ -96,27 +97,24 @@ public class SwiftLinksensePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         case "debug": logLevel = .debug
         default: logLevel = .off
         }
-        LinkSense.shared.configure(LinkSenseConfiguration(
-            sdkKey: sdkKey,
-            enableClipboard: args["enable_clipboard"] as? Bool ?? false,
-            logLevel: logLevel
-        ))
+        do {
+            try LinkSense.shared.configure(LinkSenseConfiguration(
+                sdkKey: sdkKey,
+                enableClipboard: args["enable_clipboard"] as? Bool ?? false,
+                logLevel: logLevel
+            ))
+        } catch let error as LinkSenseError {
+            result(SwiftLinksensePlugin.flutterError(from: error))
+            return
+        } catch {
+            result(FlutterError(code: "INVALID_SDK_KEY", message: error.localizedDescription, details: nil))
+            return
+        }
         isConfigured = true
         let queued = pendingActivities
         pendingActivities.removeAll()
         queued.forEach(forward)
         result(nil)
-    }
-
-    private func emitDeepLink(_ url: URL?) {
-        let encoded = url?.absoluteString ?? ""
-        DispatchQueue.main.async {
-            if let sink = self.eventSink {
-                sink(encoded)
-            } else {
-                self.bufferedDeepLinks.append(encoded)
-            }
-        }
     }
 
     // MARK: - Link CRUD
@@ -251,9 +249,24 @@ public class SwiftLinksensePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
             "og_image_url": link.ogImageUrl?.absoluteString,
             "tags": link.tags,
             "ios_clipboard_enabled": link.iosClipboardEnabled,
+            "metadata": link.metadata.map { $0.mapValues(encodeMetadata) },
             "created_at": iso.string(from: link.createdAt),
             "updated_at": iso.string(from: link.updatedAt),
         ]
+    }
+
+    /// Plain channel-codec values; `NSNull` keeps a JSON null inside
+    /// containers (Swift `nil` can't live in `[Any]`).
+    private static func encodeMetadata(_ value: LinkMetadataValue) -> Any {
+        switch value {
+        case .string(let s): return s
+        case .int(let i): return i
+        case .double(let d): return d
+        case .bool(let b): return b
+        case .array(let a): return a.map(encodeMetadata)
+        case .object(let o): return o.mapValues(encodeMetadata)
+        case .null: return NSNull()
+        }
     }
 
     private static func flutterError(from error: LinkSenseError) -> FlutterError {
@@ -266,27 +279,47 @@ public class SwiftLinksensePlugin: NSObject, FlutterPlugin, FlutterStreamHandler
         case .decodeFailure: return FlutterError(code: "DECODE_FAILURE", message: message, details: nil)
         case .forbiddenCrossScope: return FlutterError(code: "FORBIDDEN_CROSS_SCOPE", message: message, details: nil)
         case .forbiddenField: return FlutterError(code: "FORBIDDEN_FIELD", message: message, details: nil)
-        case .rateLimited(let retryAfter):
-            return FlutterError(code: "RATE_LIMITED", message: message, details: ["retryAfter": retryAfter as Any])
+        case .rateLimited(let retryAfterSeconds):
+            return FlutterError(code: "RATE_LIMITED", message: message, details: ["retryAfterSeconds": retryAfterSeconds as Any])
         case .unauthorized: return FlutterError(code: "UNAUTHORIZED", message: message, details: nil)
         case .notFound: return FlutterError(code: "NOT_FOUND", message: message, details: nil)
-        case .customPathExists: return FlutterError(code: "CUSTOM_PATH_EXISTS", message: message, details: nil)
+        case .slugExists: return FlutterError(code: "SLUG_EXISTS", message: message, details: nil)
+        case .accessDenied(let d):
+            return FlutterError(code: "ACCESS_DENIED", message: d.serverMessage, details: [
+                "upgradeRequired": d.upgradeRequired,
+                "plan": d.plan as Any,
+                "currentUsage": d.currentUsage as Any,
+                "limit": d.limit as Any,
+            ])
         case .invalidInput(let fieldErrors):
             return FlutterError(code: "INVALID_INPUT", message: message, details: ["fieldErrors": fieldErrors])
         }
     }
+}
 
-    // MARK: - FlutterStreamHandler
+/// One EventChannel's sink plus a FIFO buffer of events that arrived while
+/// no Dart listener was attached; the buffer is flushed on listen.
+private final class BufferedStream: NSObject, FlutterStreamHandler {
+    private var sink: FlutterEventSink?
+    private var buffer: [String] = []
 
-    public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-        eventSink = events
-        bufferedDeepLinks.forEach { events($0) }
-        bufferedDeepLinks.removeAll()
+    /// `""` stands for an unresolved (nil) link.
+    func emit(_ url: URL?) {
+        let encoded = url?.absoluteString ?? ""
+        DispatchQueue.main.async {
+            if let sink = self.sink { sink(encoded) } else { self.buffer.append(encoded) }
+        }
+    }
+
+    func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        sink = events
+        buffer.forEach { events($0) }
+        buffer.removeAll()
         return nil
     }
 
-    public func onCancel(withArguments arguments: Any?) -> FlutterError? {
-        eventSink = nil
+    func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        sink = nil
         return nil
     }
 }

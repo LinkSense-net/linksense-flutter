@@ -1,3 +1,43 @@
+## 0.3.0
+
+Native SDKs 0.3.0: iOS SDK v0.3.0 (vendored into the plugin) and
+`net.linksense:sdk:0.3.0`. The four LinkSense SDKs now share one API
+vocabulary (see the cross-SDK table in the README).
+
+**Breaking**
+
+* Link opens moved to the new `deepLinks` stream. `deferredDeepLinks` (now
+  on its own EventChannel `net.linksense.flutter/deferred-deep-links`)
+  emits only the `start()` result. Listen to both if you handled opens on
+  `deferredDeepLinks`.
+* Every exception class ends in `Exception`: `LinkSenseNotConfiguredException`,
+  `LinkSenseInvalidSdkKeyException`, `LinkSenseForbiddenCrossScopeException`,
+  `LinkSenseForbiddenFieldException`, `LinkSenseRateLimitedException`,
+  `LinkSenseDecodeFailureException`, `LinkSenseUnauthorizedException`,
+  `LinkSenseNotFoundException`, `LinkSenseSlugExistsException`,
+  `LinkSenseInvalidInputException`.
+* `LinkSenseCustomPathExists` / `CUSTOM_PATH_EXISTS` is now
+  `LinkSenseSlugExistsException` / `SLUG_EXISTS` (native `slugExists` /
+  `SlugExists`).
+* `UpdateLinkOptions` clearable fields are typed `FieldUpdate<T>?`:
+  `null` = unchanged, `FieldUpdate.set(v)`, `FieldUpdate.clear()`. The
+  `Object?` fields, `linkSenseClear` and `LinkSenseFieldClear` are removed.
+* The `RATE_LIMITED` platform-error detail key is `retryAfterSeconds`
+  (was `retryAfter`). Only matters if you read `PlatformException.details`.
+* `configure` now rejects a malformed SDK key on both platforms by throwing
+  `LinkSenseInvalidSdkKeyException`. The SDK stays unconfigured, and
+  `configure` can be called again with a valid key.
+
+**Added**
+
+* `LinkSense.instance.deepLinks`: a stream of every Universal Link / App
+  Link open. Opens that arrive before a listener are buffered in order.
+* `LinkSenseAccessDeniedException` (`ACCESS_DENIED`) with `upgradeRequired`,
+  `plan`, `currentUsage` and `limit`.
+* `LinkSenseLink.metadata` (`Map<String, Object?>?`).
+* Android `submitPastedLink` calls the native SDK (a documented no-op that
+  returns `null`).
+
 ## 0.2.0
 
 * Native SDKs 0.2.0: iOS SDK v0.2.0 (vendored into the plugin) and

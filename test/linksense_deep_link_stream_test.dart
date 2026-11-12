@@ -1,4 +1,4 @@
-// Tests for the deferredDeepLinks broadcast stream. Mocks the
+// Tests for the deepLinks / deferredDeepLinks broadcast streams. Mocks the
 // EventChannel by intercepting binary messenger traffic — Flutter
 // has no first-class EventChannel mock, so we route via codec
 // envelopes directly.
@@ -9,7 +9,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:linksense/linksense.dart';
 
-const _eventChannelName = 'net.linksense.flutter/deep-links';
+const _deepLinksChannel = 'net.linksense.flutter/deep-links';
+const _deferredChannel = 'net.linksense.flutter/deferred-deep-links';
 const _codec = StandardMethodCodec();
 
 void main() {
@@ -17,25 +18,49 @@ void main() {
 
   late TestDefaultBinaryMessenger messenger;
 
-  void emit(Object? event) {
+  void emitOn(String channel, Object? event) {
     messenger.handlePlatformMessage(
-      _eventChannelName,
+      channel,
       _codec.encodeSuccessEnvelope(event),
       (_) {},
     );
   }
 
+  void emit(Object? event) => emitOn(_deferredChannel, event);
+
   setUp(() {
     messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     // Acknowledge listen/cancel calls so EventChannel's subscribe completes.
-    messenger.setMockMessageHandler(_eventChannelName, (message) async {
-      return _codec.encodeSuccessEnvelope(null);
-    });
+    for (final name in const [_deepLinksChannel, _deferredChannel]) {
+      messenger.setMockMessageHandler(name, (message) async {
+        return _codec.encodeSuccessEnvelope(null);
+      });
+    }
   });
 
   tearDown(() {
-    messenger.setMockMessageHandler(_eventChannelName, null);
+    messenger.setMockMessageHandler(_deepLinksChannel, null);
+    messenger.setMockMessageHandler(_deferredChannel, null);
+  });
+
+  test('link opens and the deferred link arrive on separate streams', () async {
+    final opens = <Uri?>[];
+    final deferred = <Uri?>[];
+    final subOpens = LinkSense.instance.deepLinks.listen(opens.add);
+    final subDeferred =
+        LinkSense.instance.deferredDeepLinks.listen(deferred.add);
+    await Future<void>.delayed(Duration.zero);
+
+    emitOn(_deepLinksChannel, 'https://acme.linksense.net/open-1');
+    emitOn(_deepLinksChannel, 'https://acme.linksense.net/open-2');
+    emitOn(_deferredChannel, 'https://acme.linksense.net/deferred');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(opens.map((u) => u?.path), ['/open-1', '/open-2']);
+    expect(deferred.map((u) => u?.path), ['/deferred']);
+    await subOpens.cancel();
+    await subDeferred.cancel();
   });
 
   test('decodes a URL string into a Uri', () async {

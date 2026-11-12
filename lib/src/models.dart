@@ -56,6 +56,7 @@ class LinkSenseLink {
     this.ogImageUrl,
     this.tags = const <String>[],
     this.iosClipboardEnabled = false,
+    this.metadata,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -73,6 +74,11 @@ class LinkSenseLink {
   final String? ogImageUrl;
   final List<String> tags;
   final bool iosClipboardEnabled;
+
+  /// The link's opaque JSON metadata: values are `String`, `int`,
+  /// `double`, `bool`, `null`, `List<Object?>` or `Map<String, Object?>`.
+  /// `null` when the link has none.
+  final Map<String, Object?>? metadata;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -81,6 +87,7 @@ class LinkSenseLink {
     final tags = tagsRaw is List
         ? tagsRaw.map((e) => e.toString()).toList()
         : const <String>[];
+    final metadataRaw = raw['metadata'];
     return LinkSenseLink(
       id: raw['id'] as String,
       projectId: raw['project_id'] as String,
@@ -96,10 +103,25 @@ class LinkSenseLink {
       ogImageUrl: (raw['og_image_url'] ?? raw['social_image_url']) as String?,
       tags: tags,
       iosClipboardEnabled: raw['ios_clipboard_enabled'] as bool? ?? false,
+      metadata: metadataRaw is Map
+          ? _jsonValue(metadataRaw) as Map<String, Object?>
+          : null,
       createdAt: DateTime.parse(raw['created_at'] as String),
       updatedAt: DateTime.parse(raw['updated_at'] as String),
     );
   }
+}
+
+/// Channel maps arrive as `Map<Object?, Object?>`; re-key nested maps as
+/// `Map<String, Object?>` so callers get plain JSON-shaped Dart values.
+Object? _jsonValue(Object? value) {
+  if (value is Map) {
+    return <String, Object?>{
+      for (final e in value.entries) e.key.toString(): _jsonValue(e.value),
+    };
+  }
+  if (value is List) return value.map(_jsonValue).toList();
+  return value;
 }
 
 /// Fields accepted by `createLink`. Mirrors the server's SDK allowlist.
@@ -147,9 +169,37 @@ class CreateLinkOptions {
       };
 }
 
-/// PATCH fields. A `null` in the Dart map means "don't send"; pass a
-/// [LinkSenseFieldClear] sentinel to send `null` explicitly (which
-/// clears the field server-side).
+/// One field of an [UpdateLinkOptions]: set it to a value, or clear it
+/// (send JSON `null`). Leave the option `null` to keep the field unchanged.
+///
+/// ```dart
+/// UpdateLinkOptions(
+///   ogTitle: FieldUpdate.set('Spring sale'),
+///   desktopUrl: FieldUpdate.clear(),
+/// )
+/// ```
+sealed class FieldUpdate<T> {
+  const FieldUpdate._();
+
+  const factory FieldUpdate.set(T value) = FieldUpdateSet<T>;
+  const factory FieldUpdate.clear() = FieldUpdateClear<T>;
+}
+
+/// [FieldUpdate.set]: send [value].
+final class FieldUpdateSet<T> extends FieldUpdate<T> {
+  const FieldUpdateSet(this.value) : super._();
+
+  final T value;
+}
+
+/// [FieldUpdate.clear]: send `null`, clearing the field server-side.
+final class FieldUpdateClear<T> extends FieldUpdate<T> {
+  const FieldUpdateClear() : super._();
+}
+
+/// PATCH fields. A `null` option leaves the field unchanged. Clearable
+/// fields take a [FieldUpdate]; `name`, `tags` and `iosClipboardEnabled`
+/// can't be cleared (the server rejects `null`), so they take a plain value.
 class UpdateLinkOptions {
   const UpdateLinkOptions({
     this.name,
@@ -165,21 +215,29 @@ class UpdateLinkOptions {
   });
 
   final String? name;
-  final Object? desktopUrl;
+  final FieldUpdate<String>? desktopUrl;
   final List<String>? tags;
-  final Object? metadata;
+  final FieldUpdate<Map<String, Object?>>? metadata;
   final bool? iosClipboardEnabled;
-  final Object? iosFallbackUrl;
-  final Object? androidFallbackUrl;
-  final Object? ogTitle;
-  final Object? ogDescription;
-  final Object? ogImageUrl;
+  final FieldUpdate<String>? iosFallbackUrl;
+  final FieldUpdate<String>? androidFallbackUrl;
+  final FieldUpdate<String>? ogTitle;
+  final FieldUpdate<String>? ogDescription;
+  final FieldUpdate<String>? ogImageUrl;
 
+  /// Wire map for the bridges: an absent key leaves the field, a key with
+  /// `null` clears it.
   Map<String, Object?> toMap() {
     final map = <String, Object?>{};
-    void put(String key, Object? value) {
-      if (value == null) return;
-      map[key] = value is LinkSenseFieldClear ? null : value;
+    void put<T>(String key, FieldUpdate<T>? update) {
+      switch (update) {
+        case null:
+          return;
+        case FieldUpdateSet<T>(:final value):
+          map[key] = value;
+        case FieldUpdateClear<T>():
+          map[key] = null;
+      }
     }
 
     if (name != null) map['name'] = name;
@@ -197,11 +255,3 @@ class UpdateLinkOptions {
     return map;
   }
 }
-
-/// Marker that tells `UpdateLinkOptions.toMap` to emit JSON `null`
-/// (clearing the field server-side) rather than omitting the key.
-class LinkSenseFieldClear {
-  const LinkSenseFieldClear();
-}
-
-const LinkSenseFieldClear linkSenseClear = LinkSenseFieldClear();

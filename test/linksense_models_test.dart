@@ -14,7 +14,7 @@ void main() {
       expect(map['enable_install_referrer'], true);
       expect(map['enable_fingerprint'], true);
       expect(map['log_level'], 'off');
-      // The native 0.2.0 SDKs fix the backend at build time.
+      // The native SDKs fix the backend at build time.
       expect(map.containsKey('base_url'), isFalse);
     });
 
@@ -88,16 +88,17 @@ void main() {
       expect(const UpdateLinkOptions().toMap(), <String, Object?>{});
     });
 
-    test('linkSenseClear emits explicit JSON null for every clearable field',
+    test(
+        'FieldUpdate.clear() emits explicit JSON null for every clearable field',
         () {
       final map = const UpdateLinkOptions(
-        desktopUrl: linkSenseClear,
-        metadata: linkSenseClear,
-        iosFallbackUrl: linkSenseClear,
-        androidFallbackUrl: linkSenseClear,
-        ogTitle: linkSenseClear,
-        ogDescription: linkSenseClear,
-        ogImageUrl: linkSenseClear,
+        desktopUrl: FieldUpdate.clear(),
+        metadata: FieldUpdate.clear(),
+        iosFallbackUrl: FieldUpdate.clear(),
+        androidFallbackUrl: FieldUpdate.clear(),
+        ogTitle: FieldUpdate.clear(),
+        ogDescription: FieldUpdate.clear(),
+        ogImageUrl: FieldUpdate.clear(),
       ).toMap();
       for (final k in const [
         'desktop_url',
@@ -113,18 +114,18 @@ void main() {
       }
     });
 
-    test('non-null values pass through unchanged', () {
-      final map = UpdateLinkOptions(
+    test('FieldUpdate.set values and plain values pass through', () {
+      final map = const UpdateLinkOptions(
         name: 'renamed',
-        desktopUrl: 'https://new.example',
-        tags: const ['x'],
-        metadata: const {'k': 'v'},
+        desktopUrl: FieldUpdate.set('https://new.example'),
+        tags: ['x'],
+        metadata: FieldUpdate.set({'k': 'v'}),
         iosClipboardEnabled: true,
-        iosFallbackUrl: 'https://ios',
-        androidFallbackUrl: 'https://android',
-        ogTitle: 'new title',
-        ogDescription: 'new desc',
-        ogImageUrl: 'https://img',
+        iosFallbackUrl: FieldUpdate.set('https://ios'),
+        androidFallbackUrl: FieldUpdate.set('https://android'),
+        ogTitle: FieldUpdate.set('new title'),
+        ogDescription: FieldUpdate.set('new desc'),
+        ogImageUrl: FieldUpdate.set('https://img'),
       ).toMap();
       expect(map, {
         'name': 'renamed',
@@ -200,6 +201,33 @@ void main() {
       expect(link.ogTitle, isNull);
       expect(link.iosClipboardEnabled, isFalse);
       expect(link.tags, isEmpty);
+      expect(link.metadata, isNull);
+    });
+
+    test('parses nested metadata from channel maps', () {
+      final link = LinkSenseLink.fromMap({
+        ...base(),
+        'custom_path': 'x',
+        'metadata': <Object?, Object?>{
+          'campaign': 'spring',
+          'count': 3,
+          'ratio': 0.5,
+          'active': true,
+          'none': null,
+          'segments': <Object?>['us', 1],
+          'attrs': <Object?, Object?>{'tier': 'gold'},
+        },
+      });
+      expect(link.metadata, <String, Object?>{
+        'campaign': 'spring',
+        'count': 3,
+        'ratio': 0.5,
+        'active': true,
+        'none': null,
+        'segments': ['us', 1],
+        'attrs': {'tier': 'gold'},
+      });
+      expect(link.metadata!['attrs'], isA<Map<String, Object?>>());
     });
   });
 }

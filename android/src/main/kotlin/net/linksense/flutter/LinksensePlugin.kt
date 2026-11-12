@@ -27,8 +27,9 @@ import net.linksense.sdk.links.UpdateLinkOptions
 
 /**
  * Flutter→Android bridge. Routes MethodChannel calls to the LinkSense
- * Kotlin facade and forwards deferred-deep-link events over an
- * EventChannel. Method names match the Dart facade exactly.
+ * Kotlin facade, emits App Link opens on `…/deep-links` and the deferred
+ * `start()` result on `…/deferred-deep-links`. Method names match the Dart
+ * facade exactly.
  *
  * Implements [ActivityAware] so we can forward `Activity#onNewIntent`
  * App-Link launches into [LinkSense.handleIntent] without the
@@ -37,32 +38,36 @@ import net.linksense.sdk.links.UpdateLinkOptions
 class LinksensePlugin :
     FlutterPlugin,
     MethodChannel.MethodCallHandler,
-    EventChannel.StreamHandler,
     ActivityAware,
     PluginRegistry.NewIntentListener {
 
     private lateinit var applicationContext: Context
     private lateinit var methodChannel: MethodChannel
-    private lateinit var eventChannel: EventChannel
+    private lateinit var deepLinkChannel: EventChannel
+    private lateinit var deferredDeepLinkChannel: EventChannel
 
     private var activityBinding: ActivityPluginBinding? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private var eventSink: EventChannel.EventSink? = null
-    private var bufferedDeepLink: String? = null
-    private var bufferedReady: Boolean = false
+    /** Link opens (App Link intents). */
+    private val deepLinks = BufferedStream()
+    /** The deferred deep link from `start()`. */
+    private val deferredDeepLinks = BufferedStream()
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         applicationContext = binding.applicationContext
         methodChannel = MethodChannel(binding.binaryMessenger, "net.linksense.flutter/method")
         methodChannel.setMethodCallHandler(this)
-        eventChannel = EventChannel(binding.binaryMessenger, "net.linksense.flutter/deep-links")
-        eventChannel.setStreamHandler(this)
+        deepLinkChannel = EventChannel(binding.binaryMessenger, "net.linksense.flutter/deep-links")
+        deepLinkChannel.setStreamHandler(deepLinks)
+        deferredDeepLinkChannel = EventChannel(binding.binaryMessenger, "net.linksense.flutter/deferred-deep-links")
+        deferredDeepLinkChannel.setStreamHandler(deferredDeepLinks)
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel.setMethodCallHandler(null)
-        eventChannel.setStreamHandler(null)
+        deepLinkChannel.setStreamHandler(null)
+        deferredDeepLinkChannel.setStreamHandler(null)
     }
 
     // MARK: - MethodCallHandler
@@ -75,9 +80,7 @@ class LinksensePlugin :
             "getLink" -> handleGetLink(call, result)
             "updateLink" -> handleUpdateLink(call, result)
             "deleteLink" -> handleDeleteLink(call, result)
-            // iOS-only (paste-to-attribute). Android attributes through the
-            // Play Install Referrer, so there is nothing to submit.
-            "submitPastedLink" -> result.success(null)
+            "submitPastedLink" -> handleSubmitPastedLink(call, result)
             else -> result.notImplemented()
         }
     }
@@ -100,32 +103,44 @@ class LinksensePlugin :
             "debug" -> SdkLogLevel.DEBUG
             else -> SdkLogLevel.OFF
         }
-        LinkSense.configure(
-            applicationContext,
-            LinkSenseConfiguration(
-                sdkKey = sdkKey,
-                enableInstallReferrer = enableInstallReferrer,
-                enableFingerprint = enableFingerprint,
-                logLevel = logLevel,
-            ),
-        )
+        try {
+            LinkSense.configure(
+                applicationContext,
+                LinkSenseConfiguration(
+                    sdkKey = sdkKey,
+                    enableInstallReferrer = enableInstallReferrer,
+                    enableFingerprint = enableFingerprint,
+                    logLevel = logLevel,
+                ),
+            )
+        } catch (error: LinkSenseError) {
+            surfaceError(result, error)
+            return
+        }
         replayPendingIntents()
         result.success(null)
     }
 
     private fun handleStart(result: MethodChannel.Result) {
-        LinkSense.onDeferredDeepLink { uri ->
-            val encoded = uri?.toString() ?: ""
-            val sink = eventSink
-            if (sink != null) {
-                sink.success(encoded)
-            } else {
-                bufferedDeepLink = encoded
-                bufferedReady = true
-            }
-        }
+        LinkSense.onDeferredDeepLink(deferredDeepLinks::emit)
         LinkSense.start()
         result.success(null)
+    }
+
+    // Native is a documented no-op on Android (the Play Install Referrer
+    // covers paste-to-attribute); called anyway so behaviour follows the SDK.
+    private fun handleSubmitPastedLink(call: MethodCall, result: MethodChannel.Result) {
+        val text = (call.arguments as? Map<*, *>)?.get("text") as? String ?: run {
+            result.error("INVALID_INPUT", "submitPastedLink requires text", null)
+            return
+        }
+        scope.launch {
+            try {
+                result.success(LinkSense.submitPastedLink(text)?.toString())
+            } catch (error: Throwable) {
+                surfaceError(result, error)
+            }
+        }
     }
 
     private fun handleCreateLink(call: MethodCall, result: MethodChannel.Result) {
@@ -195,21 +210,6 @@ class LinksensePlugin :
         }
     }
 
-    // MARK: - EventChannel
-
-    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-        eventSink = events
-        if (bufferedReady) {
-            events?.success(bufferedDeepLink ?: "")
-            bufferedDeepLink = null
-            bufferedReady = false
-        }
-    }
-
-    override fun onCancel(arguments: Any?) {
-        eventSink = null
-    }
-
     // MARK: - ActivityAware + NewIntentListener (App-Link forwarding)
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
@@ -259,16 +259,7 @@ class LinksensePlugin :
     }
 
     private fun forwardIntent(intent: Intent?): Boolean {
-        return LinkSense.handleIntent(intent) { uri ->
-            val encoded = uri?.toString() ?: ""
-            val sink = eventSink
-            if (sink != null) {
-                sink.success(encoded)
-            } else {
-                bufferedDeepLink = encoded
-                bufferedReady = true
-            }
-        }
+        return LinkSense.handleIntent(intent, deepLinks::emit)
     }
 
     // MARK: - Helpers
@@ -292,14 +283,14 @@ class LinksensePlugin :
 
     private fun updateOptionsFrom(map: Map<*, *>): UpdateLinkOptions {
         return UpdateLinkOptions(
-            name = (map["name"] as? String)?.let { FieldUpdate.Set(it) } ?: FieldUpdate.Absent,
+            name = (map["name"] as? String)?.let { FieldUpdate.Set(it) } ?: FieldUpdate.Unchanged,
             desktopUrl = fieldUpdate(map, "desktop_url") { it as? String },
             tags = (map["tags"] as? List<*>)?.let { tags -> FieldUpdate.Set(tags.mapNotNull { it as? String }) }
-                ?: FieldUpdate.Absent,
+                ?: FieldUpdate.Unchanged,
             metadata = fieldUpdate(map, "metadata") { value ->
                 if (value == null) null else toMetadataMap(value as Map<*, *>)
             },
-            iosClipboardEnabled = (map["ios_clipboard_enabled"] as? Boolean)?.let { FieldUpdate.Set(it) } ?: FieldUpdate.Absent,
+            iosClipboardEnabled = (map["ios_clipboard_enabled"] as? Boolean)?.let { FieldUpdate.Set(it) } ?: FieldUpdate.Unchanged,
             iosFallbackUrl = fieldUpdate(map, "ios_fallback_url") { it as? String },
             androidFallbackUrl = fieldUpdate(map, "android_fallback_url") { it as? String },
             ogTitle = fieldUpdate(map, "og_title") { it as? String },
@@ -310,7 +301,7 @@ class LinksensePlugin :
 
     @Suppress("UNCHECKED_CAST")
     private fun <T> fieldUpdate(map: Map<*, *>, key: String, transform: (Any?) -> T?): FieldUpdate<T?> {
-        if (!map.containsKey(key)) return FieldUpdate.Absent
+        if (!map.containsKey(key)) return FieldUpdate.Unchanged
         val raw = map[key]
         return if (raw == null) FieldUpdate.Clear else FieldUpdate.Set(transform(raw))
     }
@@ -352,9 +343,21 @@ class LinksensePlugin :
         "og_image_url" to link.ogImageUrl,
         "tags" to link.tags,
         "ios_clipboard_enabled" to link.iosClipboardEnabled,
+        "metadata" to link.metadata?.mapValues { encodeMetadata(it.value) },
         "created_at" to link.createdAt,
         "updated_at" to link.updatedAt,
     )
+
+    /** Plain channel-codec values (String, Long, Double, Boolean, List, Map, null). */
+    private fun encodeMetadata(value: LinkMetadataValue): Any? = when (value) {
+        is LinkMetadataValue.StringValue -> value.value
+        is LinkMetadataValue.LongValue -> value.value
+        is LinkMetadataValue.DoubleValue -> value.value
+        is LinkMetadataValue.BoolValue -> value.value
+        is LinkMetadataValue.ArrayValue -> value.values.map(::encodeMetadata)
+        is LinkMetadataValue.ObjectValue -> value.values.mapValues { encodeMetadata(it.value) }
+        LinkMetadataValue.Null -> null
+    }
 
     private fun surfaceError(result: MethodChannel.Result, error: Throwable) {
         when (error) {
@@ -368,11 +371,21 @@ class LinksensePlugin :
             is LinkSenseError.RateLimited -> result.error(
                 "RATE_LIMITED",
                 error.message,
-                mapOf("retryAfter" to error.retryAfterSeconds),
+                mapOf("retryAfterSeconds" to error.retryAfterSeconds),
             )
             is LinkSenseError.Unauthorized -> result.error("UNAUTHORIZED", error.message, null)
             is LinkSenseError.NotFound -> result.error("NOT_FOUND", error.message, null)
-            is LinkSenseError.CustomPathExists -> result.error("CUSTOM_PATH_EXISTS", error.message, null)
+            is LinkSenseError.SlugExists -> result.error("SLUG_EXISTS", error.message, null)
+            is LinkSenseError.AccessDenied -> result.error(
+                "ACCESS_DENIED",
+                error.serverMessage,
+                mapOf(
+                    "upgradeRequired" to error.upgradeRequired,
+                    "plan" to error.plan,
+                    "currentUsage" to error.currentUsage,
+                    "limit" to error.limit,
+                ),
+            )
             is LinkSenseError.InvalidInput -> result.error(
                 "INVALID_INPUT",
                 error.message,
@@ -380,5 +393,31 @@ class LinksensePlugin :
             )
             else -> result.error("UNKNOWN", error.message ?: "unknown", null)
         }
+    }
+}
+
+/** One EventChannel's sink plus a FIFO buffer of events that arrived while
+ *  no Dart listener was attached; the buffer is flushed on listen. All calls
+ *  happen on the main thread (SDK callbacks and channel callbacks both are). */
+private class BufferedStream : EventChannel.StreamHandler {
+    private var sink: EventChannel.EventSink? = null
+    private val buffer = mutableListOf<String>()
+
+    /** `""` stands for an unresolved (null) link. */
+    fun emit(uri: Uri?) {
+        val encoded = uri?.toString() ?: ""
+        val current = sink
+        if (current != null) current.success(encoded) else buffer.add(encoded)
+    }
+
+    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+        sink = events
+        events ?: return
+        buffer.forEach(events::success)
+        buffer.clear()
+    }
+
+    override fun onCancel(arguments: Any?) {
+        sink = null
     }
 }
