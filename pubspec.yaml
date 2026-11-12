@@ -2,6 +2,8 @@ name: linksense
 description: Flutter plugin for LinkSense dynamic links and deferred deep linking on iOS and Android.
 version: 0.2.0
 homepage: https://linksense.net
+repository: https://github.com/LinkSense-net/linksense-flutter
+issue_tracker: https://github.com/LinkSense-net/linksense-flutter/issues
 
 topics:
   - deep-linking
